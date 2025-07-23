@@ -1,162 +1,166 @@
 import os
 import time
+import sys
 from pathlib import Path
-
-from markdownify import markdownify as md
-from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.edge.service import Service as EdgeService
 from selenium.common.exceptions import TimeoutException
-from webdriver_manager.microsoft import EdgeChromiumDriverManager
+import undetected_chromedriver as uc
+from markdownify import markdownify as md
+
 
 class DeepSeekChatBot:
     """
-    A Selenium-based chatbot for interacting with DeepSeek Chat.
-
-    This class handles logging in, selecting a chat session, sending prompts,
-    and retrieving responses from the DeepSeek Chat web interface.
+    DeepSeek chatbot with reliable response text extraction
     """
 
     APP_URL = "https://chat.deepseek.com/"
-    LOGIN_URL = "https://chat.deepseek.com/sign_in"
-    USER_DATA_PATH = Path(os.environ.get("LOCALAPPDATA")) / r'Microsoft\Edge\User Data\Default'
+    USER_DATA_PATH = Path(os.environ.get("LOCALAPPDATA")) / r'Google\Chrome\User Data\Default'
 
-    def __init__(self, session_to_attach):
-        """
-        Initializes the chatbot with a specific chat session.
+    def __init__(self):
+        # Initialize with visible browser
+        options = uc.ChromeOptions()
+        options.add_argument(f"--user-data-dir={self.USER_DATA_PATH}")
+        options.add_argument("--disable-blink-features=AutomationControlled")
 
-        :param session_to_attach: The name of the chat session to attach to.
-        """
-        options = webdriver.EdgeOptions()
-        options.add_argument(f"user-data-dir={self.USER_DATA_PATH}")
-        self.driver = webdriver.Edge(service=EdgeService(EdgeChromiumDriverManager().install()), options=options)
-        self.login()
-        self.is_our_first_chat = False
-        self.select_chat_session(session_to_attach)
+        self.driver = uc.Chrome(
+            options=options,
+            headless=False,
+            use_subprocess=True,
+        )
 
-    def login(self):
-        """
-        Logs into DeepSeek Chat. If manual login is required, waits for user input.
-        """
         self.driver.get(self.APP_URL)
+        self._wait_for_login()
+        self.is_our_first_chat = True
+
+    def _wait_for_login(self):
+        """Wait for chat input to appear"""
         try:
-            WebDriverWait(self.driver, 5).until(EC.url_to_be(self.APP_URL))
+            WebDriverWait(self.driver, 15).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "textarea#chat-input")))
+            if len(sys.argv) == 0:
+                print("✓ Ready to chat")
         except TimeoutException:
-            print("Please login manually in 10 mins.")
-            WebDriverWait(self.driver, 600).until(EC.url_to_be(self.APP_URL))
-        print("Login succeeded.")
+            print("Please login manually within 2 minutes...")
+            WebDriverWait(self.driver, 120).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "textarea#chat-input")))
+            print("✓ Login successful")
 
-    def select_chat_session(self, session_to_attach):
-        """
-        Selects the chat session to interact with.
-
-        :param session_to_attach: The name of the session to attach to. If None, starts a new chat.
-        """
-        WebDriverWait(self.driver, 5).until(
-            EC.presence_of_element_located((By.CLASS_NAME, "ds-icon-button"))
-        ).click()
-        time.sleep(1)
-        if session_to_attach is not None:
-            self.driver.find_elements(By.XPATH,
-                f"//*[starts-with(text(), '{session_to_attach}')]"
-            )[0].click()
-        else:
-            self.driver.find_element(By.XPATH,
-                '//*[text()="New chat" or text()="开启新对话"]'
-            ).click()
-            self.is_our_first_chat = True
-
-    def send_prompt(self, prompt):
-        """
-        Sends a prompt to the chat and retrieves the latest reply.
-
-        :param prompt: The message to send.
-        :return: The latest response in markdown format.
-        """
+    def send_message(self, prompt):
+        """Send message and return only the AI response text"""
+        # Count existing replies before sending
         if self.is_our_first_chat:
             num_history_replies = 0
         else:
-            history_replies = WebDriverWait(self.driver, 5).until(
-                EC.presence_of_all_elements_located((By.CLASS_NAME, "ds-markdown"))
-            )
+            history_replies = WebDriverWait(self.driver, 10).until(
+                EC.presence_of_all_elements_located((By.CLASS_NAME, "ds-markdown")))
             num_history_replies = len(history_replies)
 
-        time.sleep(1)
-        prompt_escaped = prompt.replace("\n", Keys.SHIFT + Keys.ENTER + Keys.SHIFT)
-        prompt_input = WebDriverWait(self.driver, 5).until(
-            EC.presence_of_element_located((By.ID, "chat-input"))
-        )
-        prompt_input.clear()
-        prompt_input.send_keys(prompt_escaped)
-        time.sleep(1)
-        prompt_input.send_keys(Keys.ENTER)
+        # Send the message
+        input_box = WebDriverWait(self.driver, 10).until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, "textarea#chat-input")))
 
-        return self._get_latest_reply(num_history_replies)
+        # Handle multi-line prompts
+        prompt_escaped = prompt.replace("\n", Keys.SHIFT + Keys.ENTER + Keys.SHIFT)
+        input_box.clear()
+        input_box.send_keys(prompt_escaped)
+        input_box.send_keys(Keys.ENTER)
+        if len(sys.argv) == 0:
+            print(f"You: {prompt}")
+
+        # Wait for and return the response
+        response = self._get_latest_reply(num_history_replies)
+        self.is_our_first_chat = False
+        return response
 
     def _get_latest_reply(self, num_history_replies):
         """
         Retrieves the latest reply from the chat after sending a prompt.
 
-        :param num_history_replies: The number of replies before sending the prompt.
-        :return: The latest reply in markdown format.
-        :raises TimeoutException: If no reply is received within the allowed retries.
+        Args:
+            num_history_replies: Number of existing replies before sending our message
+
+        Returns:
+            str: The cleaned response text
         """
+        if len(sys.argv) == 0:
+            print("Waiting for response...", end="", flush=True)
+
+        # Wait for new reply to appear
         latest_reply = None
-        maximum_trials = 600
+        maximum_trials = 60  # Max 60 seconds to wait for new reply
         for _ in range(maximum_trials):
-            all_replies = WebDriverWait(self.driver, 5).until(
-                EC.presence_of_all_elements_located((By.CLASS_NAME, "ds-markdown"))
-            )
-            if len(all_replies) >= (num_history_replies + 1):
-                latest_reply = all_replies[num_history_replies]
-                self.is_our_first_chat = False
-                break
+            try:
+                all_replies = self.driver.find_elements(By.CLASS_NAME, "ds-markdown")
+                if len(all_replies) > num_history_replies:
+                    latest_reply = all_replies[num_history_replies]
+                    break
+            except Exception:
+                pass
             time.sleep(1)
 
         if latest_reply is None:
-            raise TimeoutException(f"Failed to get the latest reply from DeepSeek.")
+            raise TimeoutException("No new reply detected")
 
-        # wait until the reply no longer changes
+        # Wait until the reply stops changing
         previous_html = ""
         stable_count = 0
-        stability_threshold = 4
-        for _ in range(maximum_trials):
-            latest_html = latest_reply.get_attribute('innerHTML')
-            if latest_html == previous_html:
-                stable_count += 1
-                if stable_count >= stability_threshold:
-                    return md(latest_html).strip()
-            else:
-                stable_count = 0
-            previous_html = latest_html
-            time.sleep(1)
+        stability_threshold = 3  # Need 3 consecutive stable checks
 
-        raise TimeoutException("WARNING: Failed to get the reply HTML.")
+        for _ in range(maximum_trials):
+            try:
+                current_html = latest_reply.get_attribute('innerHTML')
+                if current_html == previous_html:
+                    stable_count += 1
+                    if stable_count >= stability_threshold:
+                        print("\r" + " " * 50 + "\r", end="")  # Clear waiting message
+                        lines = [line.strip() for line in md(current_html).strip().split('\n') if line.strip()]
+                        return '\n'.join(lines)
+
+                else:
+                    stable_count = 0
+                    previous_html = current_html
+            except Exception:
+                pass  # Ignore stale element exceptions
+            time.sleep(0.5)
+        if len(sys.argv) == 0:
+            print("\r" + " " * 50 + "\r", end="")  # Clear waiting message
+        raise TimeoutException("Response did not stabilize")
+
 
     def close(self):
-        """
-        Closes the Selenium WebDriver session.
-        """
+        """Close the browser"""
         self.driver.quit()
 
+
 if __name__ == "__main__":
-    bot = DeepSeekChatBot(session_to_attach=None)
+    bot = None
+    try:
+        # Force flush output buffers immediately
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
 
-    test_prompts = [
-        "Hello from Selenium!",
-        "What's the weather like today?",
-        "Generate a short poem about space exploration.",
-        "Tell me a joke.\nMake it about programming!",
-        "List three key principles of good software design:\n1.\n2.\n3."
-    ]
+        bot = DeepSeekChatBot()
 
-    for prompt in test_prompts:
-        print(f"Prompt: {prompt}")
-        response = bot.send_prompt(prompt)
-        print(f"Response: {response}\n")
-        time.sleep(5)
+        if len(sys.argv) > 1:
+            msg = ' '.join(sys.argv[1:])
+            response = bot.send_message(msg)
+            print(response, flush=True)  # Explicit flush
+        else:
+            print("Enter your message (press Ctrl+C to exit):", flush=True)
+            while True:
+                msg = input("You: ")
+                if msg.lower() in ('exit', 'quit'):
+                    break
+                response = bot.send_message(msg)
+                print(f"AI: {response}\n", flush=True)  # Explicit flush
 
-    bot.close()
+    except KeyboardInterrupt:
+        print("\nExiting...", flush=True)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr, flush=True)
+    finally:
+        if bot:
+            bot.close()
